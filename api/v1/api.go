@@ -103,7 +103,7 @@ func New(
 		uptime:         time.Now(),
 		peer:           peer,
 		logger:         l,
-		m:              metrics.NewAlerts("v1", r),
+		m:              metrics.NewAlerts("v1", r, alerts),
 	}
 }
 

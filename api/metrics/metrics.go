@@ -13,7 +13,10 @@
 
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/alertmanager/provider"
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Alerts stores metrics for alerts which are common across all API versions.
 type Alerts struct {
@@ -23,7 +26,7 @@ type Alerts struct {
 }
 
 // NewAlerts returns an *Alerts struct for the given API version.
-func NewAlerts(version string, r prometheus.Registerer) *Alerts {
+func NewAlerts(version string, r prometheus.Registerer, pa provider.Alerts) *Alerts {
 	numReceivedAlerts := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        "alertmanager_alerts_received_total",
 		Help:        "The total number of received alerts.",
@@ -34,8 +37,14 @@ func NewAlerts(version string, r prometheus.Registerer) *Alerts {
 		Help:        "The total number of received alerts that were invalid.",
 		ConstLabels: prometheus.Labels{"version": version},
 	})
+	firingAlerts := verbose{
+		constLabels:  prometheus.Labels{"version": version},
+		alerts:       pa,
+		ignoreLabels: nil, // TODO
+	}
+	prometheus.NewGoCollector()
 	if r != nil {
-		r.MustRegister(numReceivedAlerts, numInvalidAlerts)
+		r.MustRegister(numReceivedAlerts, numInvalidAlerts, firingAlerts)
 	}
 	return &Alerts{
 		firing:   numReceivedAlerts.WithLabelValues("firing"),
@@ -52,3 +61,46 @@ func (a *Alerts) Resolved() prometheus.Counter { return a.resolved }
 
 // Invalid returns a counter of invalid alerts.
 func (a *Alerts) Invalid() prometheus.Counter { return a.invalid }
+
+type verbose struct {
+	constLabels  prometheus.Labels
+	alerts       provider.Alerts
+	ignoreLabels map[string]struct{}
+}
+
+// Collect exposes currently firing alerts as a prometheus metric, alertmanager_alerts_firing.
+// Alert labels are exposed as metric labels.
+func (v verbose) Collect(ch chan<- prometheus.Metric) {
+	alerts := v.alerts.GetPending()
+	defer alerts.Close()
+	for a := range alerts.Next() {
+		if a.Resolved() {
+			continue
+		}
+		var names, values []string
+		for name, value := range a.Labels {
+			if _, skip := v.ignoreLabels[string(name)]; skip {
+				continue
+			}
+			names = append(names, string(name))
+			values = append(values, string(value))
+		}
+		ch <- prometheus.MustNewConstMetric(
+			prometheus.NewDesc(
+				"alertmanager_alerts_firing",
+				"help",
+				names,
+				v.constLabels,
+			),
+			prometheus.UntypedValue,
+			1,
+			values...,
+		)
+	}
+}
+
+// Describe is a NOOP that implements prometheus.Collector.
+// Since we don't know in advance which alerts will fire, and what labels
+// they will have, we don't send any descriptions, making `verbose` an
+// unchecked Collector.
+func (v verbose) Describe(chan<- *prometheus.Desc) {}
